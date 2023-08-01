@@ -9,15 +9,13 @@ class Webcam:
         self.cap = cv2.VideoCapture(index)
         if not self.cap.isOpened():
             print("Error opening video stream or file")
-        self.background_subtractor = cv2.createBackgroundSubtractorMOG2()
+        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(history=100)
         self.kernel_size = 3
         self.detector = dlib.get_frontal_face_detector()
-        self.predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
+        self.predictor = dlib.shape_predictor(r'model\\shape_predictor_68_face_landmarks.dat')
     
     def get_frame(self):
         ret, frame = self.cap.read()
-        if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
         return ret, frame
 
     def apply_background_subtraction(self, frame):
@@ -34,12 +32,26 @@ class Webcam:
         _, mask = cv2.threshold(frame, threshold_value, 255, cv2.THRESH_BINARY)
         return mask
 
-    def apply_custom_colors(self, frame, color_black, color_white):
-        color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        color_frame[frame == 0] = color_black[::-1]  # Reverse color order
-        color_frame[frame == 255] = color_white[::-1]  # Reverse color order
-        return color_frame
+    # def apply_custom_colors(self, frame, color_black, color_white):
+    #     color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    #     color_frame[frame == 0] = color_black[::-1]  # Reverse color order
+    #     color_frame[frame == 255] = color_white[::-1]  # Reverse color order
+    #     return color_frame
 
+    def apply_custom_colors(self, frame, bright_areas, color_black, color_white):
+        # Create a copy of the frame to avoid changing the original
+        color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        
+        # Color the background areas with color 1 (black in this case)
+        color_frame[frame == 0] = color_black[::-1]  # Reverse color order
+
+        # Color the non-background (foreground) areas with color 2 (white in this case)
+        color_frame[frame == 255] = color_white[::-1]  # Reverse color order
+
+        # Lastly, color the brightest areas with color 1 (black in this case)
+        color_frame[bright_areas == 255] = color_black[::-1]  # Reverse color order
+        
+        return color_frame
     def get_face_contour(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         rects = self.detector(gray, 1)
@@ -51,12 +63,20 @@ class Webcam:
             mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
             _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
             return mask
+        
+    def get_brightest_areas(self, frame, threshold):
+        _, mask = cv2.threshold(frame, threshold, 255, cv2.THRESH_BINARY)
+        return mask
 
     def display_frames(self, frames, window_name='Frame'):
         color_frames = [cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR) if len(frame.shape) == 2 else frame for frame in frames]
         all_frames = np.concatenate(color_frames, axis=1)
         cv2.imshow(window_name, all_frames)
-        if cv2.waitKey(25) & 0xFF == ord('q'):
+
+        key = cv2.waitKey(25)
+        if key == ord(' '):  # If space bar is pressed
+            cv2.imwrite('captured_frame.jpg', color_frames[2])  # Save the current frame as 'captured_frame.jpg'
+        if key == ord('q'):
             return False
         return True
 
@@ -71,12 +91,14 @@ class App:
         self.webcam = webcam
         self.root = tk.Tk()
         self.root.title('Settings')
+        self.brightness_threshold = tk.IntVar(value=200)
         self.threshold = tk.IntVar(value=128)
         self.kernel_size = tk.IntVar(value=3)
         self.color_black = (0, 0, 0)
         self.color_white = (255, 255, 255)
 
         Scale(self.root, from_=0, to=255, orient=HORIZONTAL, variable=self.threshold, label='Threshold').pack()
+        Scale(self.root, from_=0, to=255, orient=HORIZONTAL, variable=self.brightness_threshold, label='Brightness Threshold').pack()
         Scale(self.root, from_=1, to=21, orient=HORIZONTAL, variable=self.kernel_size, label='Kernel size', length=400).pack()
         tk.Button(self.root, text='Pick color for 0s', command=self.pick_color_black).pack()
         tk.Button(self.root, text='Pick color for 1s', command=self.pick_color_white).pack()
@@ -96,26 +118,34 @@ class App:
 
     def main_loop(self):
         while True:
-            ret, frame = self.webcam.get_frame()
+            ret, color_frame = self.webcam.get_frame()
+            frame = cv2.cvtColor(color_frame, cv2.COLOR_BGR2GRAY)
             if ret:
 
                 # collect data from widgets
                 self.webcam.kernel_size = self.kernel_size.get() // 2 * 2 + 1  # Ensure the kernel size is odd
-                
-                face_contour = self.webcam.get_face_contour(frame)
+
+                face_contour = self.webcam.get_face_contour(color_frame)
+                if face_contour is None:  # If no face was detected, use a blank mask
+                    face_contour = np.zeros_like(frame)
+
+
+                bright_areas = self.webcam.get_brightest_areas(frame, self.brightness_threshold.get())
+
                 thresholded_frame = self.webcam.apply_threshold(frame, self.threshold.get())
+
                 background_less_frame = self.webcam.apply_background_subtraction(thresholded_frame)
-                masked_frame = cv2.bitwise_and(frame, frame, mask=background_less_frame)
-                smoothened_frame = self.webcam.apply_morphology(masked_frame)
-                colored_frame = self.webcam.apply_custom_colors(smoothened_frame, self.color_black, self.color_white)
+
+                colored_frame = self.webcam.apply_custom_colors(thresholded_frame, bright_areas, self.color_black, self.color_white)
+                colored_frame_with_bg = self.webcam.apply_custom_colors(background_less_frame, bright_areas, self.color_black, self.color_white)
+
 
                 frames_to_display = [
                     frame,
-                    face_contour,
-                    background_less_frame,
-                    masked_frame,
-                    smoothened_frame,
-                    colored_frame
+                    thresholded_frame,
+                    bright_areas,
+                    colored_frame,
+                    colored_frame_with_bg
                 ]
                 if not self.webcam.display_frames(frames_to_display):
                     break
